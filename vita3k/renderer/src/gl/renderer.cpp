@@ -1,5 +1,5 @@
 // Vita3K emulator project
-// Copyright (C) 2021 Vita3K team
+// Copyright (C) 2022 Vita3K team
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -298,6 +298,8 @@ bool GLState::init(const char *base_path, const bool hashless_texture_cache) {
         LOG_ERROR("Failed to initialize screen renderer");
         return false;
     }
+
+    shader_version = fmt::format("v{}", shader::CURRENT_VERSION);
 
     return true;
 }

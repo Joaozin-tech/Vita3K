@@ -34,6 +34,7 @@ add_library(
 	include/renderer/gl/functions.h
 
 	src/gl/attribute_formats.cpp
+	src/gl/color_formats.cpp
 	src/gl/compile_program.cpp
 	src/gl/draw.cpp
 	src/gl/fence.cpp

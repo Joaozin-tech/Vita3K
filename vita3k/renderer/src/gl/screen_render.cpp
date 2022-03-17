@@ -1,5 +1,5 @@
 // Vita3K emulator project
-// Copyright (C) 2021 Vita3K team
+// Copyright (C) 2022 Vita3K team
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -166,10 +166,6 @@ void ScreenRenderer::render(const SceFVector2 &viewport_pos, const SceFVector2 &
     glEnableVertexAttribArray(uvAttrib);
 
     glBindTexture(GL_TEXTURE_2D, texture);
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
     glBindTexture(GL_TEXTURE_2D, last_texture);
