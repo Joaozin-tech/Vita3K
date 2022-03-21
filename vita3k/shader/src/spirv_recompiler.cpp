@@ -827,7 +827,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         const spv::Id param_type = get_param_type(b, input);
         int type_size = get_data_type_size(input.type);
         spv::Id var;
-        if (regformat) {
+        if (false) {
             int num_comp = type_size * input.array_size * input.component_count / 4;
             spv::Id type = utils::make_vector_or_scalar_type(b, b.makeIntType(32), num_comp);
             var = b.createVariable(spv::NoPrecision, spv::StorageClassInput, type, name.c_str());
