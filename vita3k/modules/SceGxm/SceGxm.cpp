@@ -584,11 +584,17 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
     if (colorSurface) {
         color_surface_copy = new SceGxmColorSurface;
         *color_surface_copy = *colorSurface;
+
+        context->state.color_surface = *colorSurface;
+        context->state.surface_flags |= 1;
     }
 
     if (depthStencil) {
         depth_stencil_surface_copy = new SceGxmDepthStencilSurface;
         *depth_stencil_surface_copy = *depthStencil;
+
+        context->state.depth_stencil_surface = *depthStencil;
+        context->state.surface_flags |= 2;
     }
 
     renderer::set_context(*host.renderer, context->renderer.get(), renderTarget->renderer.get(), color_surface_copy,
@@ -1041,13 +1047,31 @@ EXPORT(int, sceGxmDisplayQueueFinish) {
     return 0;
 }
 
-static void gxmSetUniformBuffers(renderer::State &state, SceGxmContext *context, const SceGxmProgram &program, const UniformBuffers &buffers, const UniformBufferSizes &sizes, KernelState &kern, const MemState &mem, const SceUID current_thread) {
+static void gxmSetUniformBuffers(renderer::State &state, GxmState &gxm, SceGxmContext *context, const SceGxmProgram &program, const UniformBuffers &buffers, const UniformBufferSizes &sizes, KernelState &kern, const MemState &mem, const SceUID current_thread) {
     for (std::size_t i = 0; i < buffers.size(); i++) {
         if (!buffers[i] || sizes.at(i) == 0) {
             continue;
         }
 
         std::uint32_t bytes_to_copy = sizes.at(i) * 4;
+        if (sizes.at(i) == SCE_GXM_MAX_UB_IN_FLOAT_UNIT) {
+            auto ite = gxm.memory_mapped_regions.lower_bound(buffers[i].address());
+            if ((ite != gxm.memory_mapped_regions.end()) && ((ite->first + ite->second.size) > buffers[i].address())) {
+                // Bound the size
+                bytes_to_copy = std::min<std::uint32_t>(ite->first + ite->second.size - buffers[i].address(), bytes_to_copy);
+            }
+
+            // Check other UB friends and bound the size
+            for (std::size_t j = 0; j < SCE_GXM_MAX_UNIFORM_BUFFERS; j++) {
+                if (i == j) {
+                    continue;
+                }
+
+                if (buffers[j].address() > buffers[i].address()) {
+                    bytes_to_copy = std::min<std::uint32_t>(buffers[j].address() - buffers[i].address(), bytes_to_copy);
+                }
+            }
+        }
         std::uint8_t **dest = renderer::set_uniform_buffer(state, context->renderer.get(), !program.is_fragment(), i, bytes_to_copy);
 
         if (dest) {
@@ -1146,9 +1170,9 @@ static int gxmDrawElementGeneral(HostState &host, const char *export_name, const
     const SceGxmProgram &vertex_program_gxp = *gxm_vertex_program.program.get(host.mem);
     const SceGxmProgram &fragment_program_gxp = *gxm_fragment_program.program.get(host.mem);
 
-    gxmSetUniformBuffers(*host.renderer, context, vertex_program_gxp, context->state.vertex_uniform_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
+    gxmSetUniformBuffers(*host.renderer, host.gxm, context, vertex_program_gxp, context->state.vertex_uniform_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
         host.kernel, host.mem, thread_id);
-    gxmSetUniformBuffers(*host.renderer, context, fragment_program_gxp, context->state.fragment_uniform_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
+    gxmSetUniformBuffers(*host.renderer, host.gxm, context, fragment_program_gxp, context->state.fragment_uniform_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
         host.kernel, host.mem, thread_id);
 
     if (context->last_precomputed) {
@@ -1291,10 +1315,10 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
     const SceGxmProgram &vertex_program_gxp = *vertex_program->program.get(host.mem);
     const SceGxmProgram &fragment_program_gxp = *fragment_program->program.get(host.mem);
 
-    gxmSetUniformBuffers(*host.renderer, context, vertex_program_gxp, (vertex_state ? (*vertex_state->uniform_buffers.get(host.mem)) : context->state.vertex_uniform_buffers), vertex_program->renderer_data->uniform_buffer_sizes,
+    gxmSetUniformBuffers(*host.renderer, host.gxm, context, vertex_program_gxp, (vertex_state ? (*vertex_state->uniform_buffers.get(host.mem)) : context->state.vertex_uniform_buffers), vertex_program->renderer_data->uniform_buffer_sizes,
         host.kernel, host.mem, thread_id);
 
-    gxmSetUniformBuffers(*host.renderer, context, fragment_program_gxp, (fragment_state ? (*fragment_state->uniform_buffers.get(host.mem)) : context->state.fragment_uniform_buffers), fragment_program->renderer_data->uniform_buffer_sizes,
+    gxmSetUniformBuffers(*host.renderer, host.gxm, context, fragment_program_gxp, (fragment_state ? (*fragment_state->uniform_buffers.get(host.mem)) : context->state.fragment_uniform_buffers), fragment_program->renderer_data->uniform_buffer_sizes,
         host.kernel, host.mem, thread_id);
 
     // Update vertex data. We should stores a copy of the data to pass it to GPU later, since another scene
@@ -1409,6 +1433,134 @@ EXPORT(int, sceGxmEndCommandList, SceGxmContext *deferredContext, SceGxmCommandL
     return 0;
 }
 
+static bool update_surface_syncing_last_active_time(HostState &host, Address target_region, std::size_t size, Address fault_addr) {
+    if ((target_region > fault_addr) || (fault_addr >= (target_region + size))) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < host.gxm.surface_syncing_infoes.size(); i++) {
+        if ((host.gxm.surface_syncing_infoes[i].addr == target_region) && (size == host.gxm.surface_syncing_infoes[i].size)) {
+            if (host.gxm.surface_syncing_infoes[i].syncing_disabled()) {
+                host.mem.protect_mutex.unlock();
+
+                // We must get it up to date immediately! This is expected to not call often
+                // For some AAA games they grab a copy off this. So not every frame, (hope so!)
+                SceGxmColorSurface sync_info;
+                sync_info.data = host.gxm.surface_syncing_infoes[i].addr;
+                sync_info.width = host.gxm.surface_syncing_infoes[i].width;
+                sync_info.height = host.gxm.surface_syncing_infoes[i].height;
+                sync_info.strideInPixels = host.gxm.surface_syncing_infoes[i].stride;
+                sync_info.colorFormat = host.gxm.surface_syncing_infoes[i].sync_format;
+                sync_info.surfaceType = host.gxm.surface_syncing_infoes[i].surface_type;
+
+                renderer::sync_surface_data_explicit_sync(*host.renderer, sync_info);
+
+                host.mem.protect_mutex.lock();
+            }
+
+            host.gxm.surface_syncing_infoes[i].scene_time_last_memaccess = host.gxm.surface_syncing_infoes[i].scene_time_passed;
+            host.gxm.surface_syncing_infoes[i].reprotect_needed = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void try_apply_color_surface_syncing(HostState &host, SceGxmContext *context) {
+    if (context->state.surface_flags & 1) {
+        const std::size_t color_surface_size = gxm::get_stride_in_bytes(context->state.color_surface.colorFormat,
+                                                   context->state.color_surface.strideInPixels)
+            * context->state.color_surface.height;
+        const Address color_surface_addr = context->state.color_surface.data.address();
+
+        // For not messing with other content, we only watch the region where the data belongs
+        const Address color_surface_aligned_beg_addr = align(color_surface_addr, host.mem.page_size);
+        const Address color_surface_aligned_end_addr = align_down(color_surface_addr + color_surface_size, host.mem.page_size);
+
+        if (color_surface_aligned_end_addr - color_surface_aligned_beg_addr < host.mem.page_size) {
+            // Not possible to watch without degrading performance, and the payback is low. Syncing is way better
+            renderer::sync_surface_data(*host.renderer, context->renderer.get());
+            return;
+        }
+
+        // Try to see if we can put a sync right here. Else we can sync later in a protect if needed.
+        bool found = false;
+        for (std::size_t i = 0; i < host.gxm.surface_syncing_infoes.size(); i++) {
+            if ((host.gxm.surface_syncing_infoes[i].addr == color_surface_addr) && (host.gxm.surface_syncing_infoes[i].size == color_surface_size)) {
+                host.gxm.surface_syncing_infoes[i].scene_time_passed++;
+                found = true;
+
+                if (!host.gxm.surface_syncing_infoes[i].syncing_disabled()) {
+                    // Immediately do a sync. Avoid protecting too much cause page fault is expensive
+                    renderer::sync_surface_data(*host.renderer, context->renderer.get());
+                }
+
+                // Insert a bit early to check and ensure continous sync. Wait for it to come
+                // is expensive.
+                if (host.gxm.surface_syncing_infoes[i].reprotect_needed && host.gxm.surface_syncing_infoes[i].should_insert_protect_fence()) {
+                    add_protect(host.mem, color_surface_aligned_beg_addr, color_surface_aligned_end_addr - color_surface_aligned_beg_addr, MEM_PERM_NONE, [&host, color_surface_addr, color_surface_size](Address fault, bool is_write) {
+                        return update_surface_syncing_last_active_time(host, color_surface_addr, color_surface_size, fault);
+                    });
+
+                    host.gxm.surface_syncing_infoes[i].reprotect_needed = false;
+                }
+
+                break;
+            }
+        }
+
+        if (!found) {
+            // Choose a free slot first
+            bool found_free = false;
+            std::size_t oldest_inactive_index = 0;
+
+            for (std::size_t i = 0; i < host.gxm.surface_syncing_infoes.size(); i++) {
+                if ((host.gxm.surface_syncing_infoes[i].addr == 0) || (host.gxm.surface_syncing_infoes[i].addr == color_surface_addr)) {
+                    host.gxm.surface_syncing_infoes[i].addr = color_surface_addr;
+                    host.gxm.surface_syncing_infoes[i].size = color_surface_size;
+                    host.gxm.surface_syncing_infoes[i].width = context->state.color_surface.width;
+                    host.gxm.surface_syncing_infoes[i].height = context->state.color_surface.height;
+                    host.gxm.surface_syncing_infoes[i].stride = context->state.color_surface.strideInPixels;
+                    host.gxm.surface_syncing_infoes[i].sync_format = context->state.color_surface.colorFormat;
+                    host.gxm.surface_syncing_infoes[i].surface_type = context->state.color_surface.surfaceType;
+                    host.gxm.surface_syncing_infoes[i].scene_time_last_memaccess = SCENE_TIME_UNDEF;
+                    host.gxm.surface_syncing_infoes[i].scene_time_passed = 1;
+                    host.gxm.surface_syncing_infoes[i].reprotect_needed = false;
+
+                    found_free = true;
+                    break;
+                }
+
+                if (i != 0) {
+                    if (host.gxm.surface_syncing_infoes[i].scene_time_last_memaccess < host.gxm.surface_syncing_infoes[oldest_inactive_index].scene_time_last_memaccess) {
+                        oldest_inactive_index = i;
+                    }
+                }
+            }
+
+            if (!found_free) {
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].addr = color_surface_addr;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].size = color_surface_size;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].width = context->state.color_surface.width;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].height = context->state.color_surface.height;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].stride = context->state.color_surface.strideInPixels;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].sync_format = context->state.color_surface.colorFormat;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].surface_type = context->state.color_surface.surfaceType;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].scene_time_last_memaccess = SCENE_TIME_UNDEF;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].scene_time_passed = 1;
+                host.gxm.surface_syncing_infoes[oldest_inactive_index].reprotect_needed = false;
+            }
+
+            // Protecting the data, to track sync progress. The first active will always do a sync to prevent unwanted flash
+            renderer::sync_surface_data(*host.renderer, context->renderer.get());
+            add_protect(host.mem, color_surface_aligned_beg_addr, color_surface_aligned_end_addr - color_surface_aligned_beg_addr, MEM_PERM_NONE, [&host, color_surface_addr, color_surface_size](Address fault, bool is_write) {
+                return update_surface_syncing_last_active_time(host, color_surface_addr, color_surface_size, fault);
+            });
+        }
+    }
+}
+
 EXPORT(int, sceGxmEndScene, SceGxmContext *context, SceGxmNotification *vertexNotification, SceGxmNotification *fragmentNotification) {
     const MemState &mem = host.mem;
 
@@ -1425,7 +1577,8 @@ EXPORT(int, sceGxmEndScene, SceGxmContext *context, SceGxmNotification *vertexNo
     }
 
     // Add command to end the scene
-    renderer::sync_surface_data(*host.renderer, context->renderer.get());
+    // TODO: Proper syncing of depth stencil surface. For now we don't care, but it's certainly essential!
+    try_apply_color_surface_syncing(host, context);
 
     // Add NOP for SceGxmFinish
     renderer::add_command(context->renderer.get(), renderer::CommandOpcode::Nop, &context->renderer->render_finish_status,
@@ -1722,13 +1875,21 @@ EXPORT(int, sceGxmMapFragmentUsseMemory, Ptr<void> base, uint32_t size, uint32_t
 }
 
 EXPORT(int, sceGxmMapMemory, Ptr<void> base, uint32_t size, uint32_t attribs) {
-    STUBBED("always return success");
-
     if (!base) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
 
-    return 0;
+    // Check if it has already been mapped
+    // Some games intentionally overlapping mapped region. Nothing we can do. Allow it, bear your own consequences.
+    GxmState &gxm = host.gxm;
+
+    auto ite = gxm.memory_mapped_regions.lower_bound(base.address());
+    if ((ite == gxm.memory_mapped_regions.end()) || (ite->first != base.address())) {
+        gxm.memory_mapped_regions.emplace(base.address(), MemoryMapInfo{ base.address(), size, attribs });
+        return 0;
+    }
+
+    return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 }
 
 EXPORT(int, sceGxmMapVertexUsseMemory, Ptr<void> base, uint32_t size, uint32_t *offset) {
@@ -4045,11 +4206,17 @@ EXPORT(int, sceGxmUnmapFragmentUsseMemory, void *base) {
     return 0;
 }
 
-EXPORT(int, sceGxmUnmapMemory, void *base) {
+EXPORT(int, sceGxmUnmapMemory, Ptr<void> base) {
     if (!base) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
 
+    auto ite = host.gxm.memory_mapped_regions.find(base.address());
+    if (ite == host.gxm.memory_mapped_regions.end()) {
+        return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
+    }
+
+    host.gxm.memory_mapped_regions.erase(ite);
     return 0;
 }
 

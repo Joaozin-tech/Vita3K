@@ -23,6 +23,8 @@
 
 namespace shader {
 
+static constexpr std::uint32_t MAX_UB_IN_VEC4_UNIT = 2048;
+
 usse::GenericType translate_generic_type(const gxp::GenericParameterType &type);
 std::tuple<usse::DataType, std::string> get_parameter_type_store_and_name(const SceGxmParameterType &type);
 usse::ProgramInput get_program_input(const SceGxmProgram &program);
