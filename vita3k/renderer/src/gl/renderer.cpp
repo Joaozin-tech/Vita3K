@@ -520,7 +520,16 @@ static std::map<SceGxmColorFormat, std::pair<GLenum, GLenum>> GXM_COLOR_FORMAT_T
     { SCE_GXM_COLOR_FORMAT_SE5M9M9M9_RGB, { GL_RGB, GL_HALF_FLOAT } }
 };
 
-void post_process_pixels_data(std::uint32_t *pixels, const std::uint32_t width, const std::uint32_t height, const std::uint32_t stride,
+static bool format_need_temp_storage(SceGxmColorFormat format, std::vector<std::uint8_t> &storage, const std::uint32_t width, const std::uint32_t height) {
+    if ((format == SCE_GXM_COLOR_FORMAT_SE5M9M9M9_BGR) || (format == SCE_GXM_COLOR_FORMAT_SE5M9M9M9_RGB)) {
+        storage.resize(width * height * 3 * 2); // RGB and half float
+        return true;
+    }
+
+    return false;
+}
+
+static void post_process_pixels_data(std::uint32_t *pixels, std::uint8_t *source, const std::uint32_t width, const std::uint32_t height, const std::uint32_t stride,
     SceGxmColorFormat format, SceGxmColorSurfaceType surface_type) {
     switch (format) {
     case SCE_GXM_COLOR_FORMAT_U8U8U8U8_RGBA:
@@ -532,7 +541,7 @@ void post_process_pixels_data(std::uint32_t *pixels, const std::uint32_t width, 
         break;
     case SCE_GXM_COLOR_FORMAT_SE5M9M9M9_RGB:
     case SCE_GXM_COLOR_FORMAT_SE5M9M9M9_BGR: {
-        std::vector<uint16_t> temp_bytes(width * height * 3);
+        std::uint16_t *temp_bytes = reinterpret_cast<std::uint16_t *>(source);
         for (int i = 0, iptr = 0; i < width * height; ++i) {
             uint32_t pixel = 0;
             pixel |= (uint32_t(temp_bytes[iptr++] << 17) & (0x3FFFF << 18)); // Exp + 9 bits
@@ -590,23 +599,30 @@ void lookup_and_get_surface_data(GLState &renderer, MemState &mem, SceGxmColorSu
     }
 
     std::uint32_t *pixels = surface.data.cast<std::uint32_t>().get(mem);
+    std::uint8_t *temp_store = reinterpret_cast<std::uint8_t *>(pixels);
     if (!pixels) {
         return;
     }
 
+    std::vector<std::uint8_t> storage_v;
+    if (format_need_temp_storage(surface.colorFormat, storage_v, surface.strideInPixels, height)) {
+        temp_store = storage_v.data();
+        buffer_size = storage_v.size();
+    }
+
     if (renderer.features.support_get_texture_sub_image) {
         glGetTextureSubImage(tex_handle, 0, 0, 0, 0, width, height, 1, format_gl->second.first, format_gl->second.second,
-            buffer_size, pixels);
+            buffer_size, temp_store);
     } else {
         GLint last_texture = 0;
 
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
         glBindTexture(GL_TEXTURE_2D, tex_handle);
-        glGetTexImage(GL_TEXTURE_2D, 0, format_gl->second.first, format_gl->second.second, pixels);
+        glGetTexImage(GL_TEXTURE_2D, 0, format_gl->second.first, format_gl->second.second, temp_store);
         glBindTexture(GL_TEXTURE_2D, last_texture);
     }
 
-    post_process_pixels_data(pixels, width, height, surface.strideInPixels, surface.colorFormat, surface.surfaceType);
+    post_process_pixels_data(pixels, temp_store, width, height, surface.strideInPixels, surface.colorFormat, surface.surfaceType);
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
 }
 
@@ -625,8 +641,15 @@ void get_surface_data(GLState &renderer, GLContext &context, size_t width, size_
         return;
     }
 
-    glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), format_gl->second.first, format_gl->second.second, pixels);
-    post_process_pixels_data(pixels, width, height, stride_in_pixels, format, surface_type);
+    std::uint8_t *temp_store = reinterpret_cast<std::uint8_t *>(pixels);
+    std::vector<std::uint8_t> storage_v;
+
+    if (format_need_temp_storage(format, storage_v, stride_in_pixels, height)) {
+        temp_store = storage_v.data();
+    }
+
+    glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), format_gl->second.first, format_gl->second.second, temp_store);
+    post_process_pixels_data(pixels, temp_store, width, height, stride_in_pixels, format, surface_type);
 
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     ++renderer.texture_cache.timestamp;
