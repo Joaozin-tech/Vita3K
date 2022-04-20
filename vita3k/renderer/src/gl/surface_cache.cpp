@@ -565,7 +565,7 @@ std::uint64_t GLSurfaceCache::retrieve_framebuffer_handle(SceGxmColorSurface *co
         color_handle = target->attachments[0];
     }
 
-    if (ds_handle) {
+    if (depth_stencil) {
         ds_handle = static_cast<GLuint>(retrieve_depth_stencil_texture_handle(*depth_stencil));
     } else {
         ds_handle = target->attachments[1];
