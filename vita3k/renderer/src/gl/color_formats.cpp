@@ -34,6 +34,9 @@ static const GLint swizzle_argb[4] = { GL_BLUE, GL_GREEN, GL_RED, GL_ALPHA };
 static const GLint swizzle_rgba[4] = { GL_ALPHA, GL_BLUE, GL_GREEN, GL_RED };
 static const GLint swizzle_bgra[4] = { GL_GREEN, GL_BLUE, GL_ALPHA, GL_RED };
 
+static const GLint swizzle_rgb[4] = { GL_BLUE, GL_GREEN, GL_RED, GL_ONE };
+static const GLint swizzle_bgr[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ONE };
+
 static const GLint *translate_swizzle(SceGxmColorSwizzle4Mode mode) {
     switch (mode) {
     case SCE_GXM_COLOR_SWIZZLE4_ABGR:
@@ -49,6 +52,17 @@ static const GLint *translate_swizzle(SceGxmColorSwizzle4Mode mode) {
     }
 
     return swizzle_abgr;
+}
+
+static const GLint *translate_swizzle(SceGxmColorSwizzle3Mode mode) {
+    switch (mode) {
+    case SCE_GXM_COLOR_SWIZZLE3_BGR:
+        return swizzle_bgr;
+    case SCE_GXM_COLOR_SWIZZLE3_RGB:
+        return swizzle_rgb;
+    }
+
+    return swizzle_bgr;
 }
 
 // Translate popular color base format that can be bit-casted for purposes
@@ -115,7 +129,12 @@ const GLint *translate_swizzle(SceGxmColorFormat fmt) {
     case SCE_GXM_COLOR_BASE_FORMAT_S8S8S8S8:
     case SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16:
     case SCE_GXM_COLOR_BASE_FORMAT_U2U10U10U10:
+    case SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10:
         return translate_swizzle(static_cast<SceGxmColorSwizzle4Mode>(swizzle));
+
+    case SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9:
+    case SCE_GXM_COLOR_BASE_FORMAT_U5U6U5:
+        return translate_swizzle(static_cast<SceGxmColorSwizzle3Mode>(swizzle));
 
     default:
         break;
